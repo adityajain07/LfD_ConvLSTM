@@ -1,0 +1,760 @@
+{
+  "nbformat": 4,
+  "nbformat_minor": 0,
+  "metadata": {
+    "colab": {
+      "name": "ImitationLearning-Intent-V2",
+      "provenance": [],
+      "collapsed_sections": [],
+      "toc_visible": true
+    },
+    "kernelspec": {
+      "display_name": "Python 3",
+      "language": "python",
+      "name": "python3"
+    },
+    "language_info": {
+      "codemirror_mode": {
+        "name": "ipython",
+        "version": 3
+      },
+      "file_extension": ".py",
+      "mimetype": "text/x-python",
+      "name": "python",
+      "nbconvert_exporter": "python",
+      "pygments_lexer": "ipython3",
+      "version": "3.7.0"
+    }
+  },
+  "cells": [
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "colab_type": "text",
+        "id": "3j__1QFRpDhC"
+      },
+      "source": [
+        "# Primitive Segmentation using ConvLSTM\n",
+        "\n",
+        "**Author:** Aditya Jain <br>\n",
+        "**Date started:** 27th July, 2020<br>\n",
+        "**Description:** Predict primitves actions in a human demonstration using ConvLSTM model."
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "colab_type": "text",
+        "id": "ZFJSlMAbpDhE"
+      },
+      "source": [
+        "### Setup\n"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "metadata": {
+        "id": "S7gn6YDneJAa",
+        "colab_type": "code",
+        "colab": {
+          "base_uri": "https://localhost:8080/",
+          "height": 122
+        },
+        "outputId": "04c75b24-6e8f-4e32-ab52-8f9bff3b3aad"
+      },
+      "source": [
+        "from google.colab import drive\n",
+        "drive.mount('/content/drive', force_remount=False)"
+      ],
+      "execution_count": 2,
+      "outputs": [
+        {
+          "output_type": "stream",
+          "text": [
+            "Go to this URL in a browser: https://accounts.google.com/o/oauth2/auth?client_id=947318989803-6bn6qk8qdgf4n4g3pfee6491hc0brc4i.apps.googleusercontent.com&redirect_uri=urn%3aietf%3awg%3aoauth%3a2.0%3aoob&scope=email%20https%3a%2f%2fwww.googleapis.com%2fauth%2fdocs.test%20https%3a%2f%2fwww.googleapis.com%2fauth%2fdrive%20https%3a%2f%2fwww.googleapis.com%2fauth%2fdrive.photos.readonly%20https%3a%2f%2fwww.googleapis.com%2fauth%2fpeopleapi.readonly&response_type=code\n",
+            "\n",
+            "Enter your authorization code:\n",
+            "··········\n",
+            "Mounted at /content/drive\n"
+          ],
+          "name": "stdout"
+        }
+      ]
+    },
+    {
+      "cell_type": "code",
+      "metadata": {
+        "colab_type": "code",
+        "id": "1_bJF4iepDhF",
+        "colab": {}
+      },
+      "source": [
+        "from tensorflow import keras\n",
+        "import tensorflow as tf\n",
+        "from tensorflow.keras import layers\n",
+        "import numpy as np\n",
+        "import math\n",
+        "import pylab as plt\n",
+        "import os\n",
+        "import glob\n",
+        "import cv2\n",
+        "from google.colab.patches import cv2_imshow\n",
+        "from sklearn.model_selection import train_test_split\n",
+        "from keras.callbacks import ModelCheckpoint\n",
+        "import datetime\n",
+        "import pickle as pkl"
+      ],
+      "execution_count": 3,
+      "outputs": []
+    },
+    {
+      "cell_type": "code",
+      "metadata": {
+        "id": "ZeqMeiJCzxTa",
+        "colab_type": "code",
+        "colab": {}
+      },
+      "source": [
+        "N_CLASSES  = 0          # no. of primitves in the TADL, initializing by zero, will be later updated\n",
+        "PX         = 128        # no. of rows in training/test images\n",
+        "PY         = 128        # no. of columns in training/test images\n",
+        "CHANNELS   = 3          # no. of channels in the image\n",
+        "N_FRAMES   = 20         # no. of frames in each training/test video\n",
+        "BATCH_SIZE = 32         # size of the batches\n",
+        "DATA_DIR   = \"/content/drive/My Drive/TCS FullTime Work/LfD/Liquid_Pouring/TADL-II/\"\n",
+        "TEST_SPLIT = 0.2        # no. of test samples to draw from data\n",
+        "\n",
+        "# directory for saving the trained model\n",
+        "WRITE_DIR  =  \"/content/drive/My Drive/TCS FullTime Work/LfD/Liquid_Pouring/Trained_Models/\"     "
+      ],
+      "execution_count": 4,
+      "outputs": []
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "gkiq6-1Aejkz",
+        "colab_type": "text"
+      },
+      "source": [
+        "## Building the Dataset\n",
+        "\n",
+        "Reads the datafiles and builds the dataset"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "metadata": {
+        "id": "UdCVIG7Mlms0",
+        "colab_type": "code",
+        "colab": {}
+      },
+      "source": [
+        "def preprocessing(img, width, height):\n",
+        "  '''\n",
+        "  returns a preprocessed image suitable for training\n",
+        "  '''\n",
+        "  img = cv2.resize(img, (width, height))       # image resize\n",
+        "  # cv2_imshow(img)                            # optional command to visualize the read image\n",
+        "  img = img.astype(\"float32\") / 255            # rescale the image from 0-1\n",
+        "\n",
+        "  return img\n",
+        "\n",
+        "\n",
+        "\n",
+        "def build_dataset(dataset_dir, n_frames):\n",
+        "  '''   \n",
+        "  takes input the parent data directory and no of frames to sample from every video;\n",
+        "  returns the data and label in correct format and dimensions\n",
+        "  '''\n",
+        "  # no. of primitives in the library\n",
+        "  prim_actions    = [dI for dI in os.listdir(dataset_dir) if os.path.isdir(os.path.join(dataset_dir,dI))]\n",
+        "  prim_no         = 0                               # label for every primitive\n",
+        "\n",
+        "  # stores the final data to be returned\n",
+        "  image_data  = []\n",
+        "  label_data  = []\n",
+        "\n",
+        "  for action in prim_actions:\n",
+        "    # prim_dict[action] = i\n",
+        "    prim_path       = os.path.join(DATA_DIR, action)   # gives path for each primitive  \n",
+        "    prim_no         += 1\n",
+        "\n",
+        "    for video_path in glob.iglob(prim_path + '/*.mp4'):  # iterate over every primitive video\n",
+        "      # print(video_path)\n",
+        "\n",
+        "      # for storing data for the current video\n",
+        "      temp_image   = []\n",
+        "      temp_label   = []\n",
+        "      \n",
+        "      sec         = 0      \n",
+        "      vidcap      = cv2.VideoCapture(video_path)     \n",
+        "      fps         = vidcap.get(cv2.CAP_PROP_FPS)           #  FPS of the video      \n",
+        "      frame_count = vidcap.get(cv2.CAP_PROP_FRAME_COUNT)   #  total frame count\n",
+        "      total_sec   = frame_count/fps                        #  total video length in seconds\n",
+        "      # print(\"Total Time: \", total_sec, frame_count)\n",
+        "\n",
+        "      TIME_SEC    = total_sec/n_frames                     # the video will be sampled after every TIME_SEC          \n",
+        "      i = 0\n",
+        "      while (sec < total_sec):\n",
+        "        vidcap.set(cv2.CAP_PROP_POS_MSEC,sec*1000)         # setting which frame to get\n",
+        "    \n",
+        "        sec          += TIME_SEC\n",
+        "        success,image = vidcap.read()\n",
+        "    \n",
+        "        if success:\n",
+        "          process_image = preprocessing(image, PX, PY)\n",
+        "          temp_image.append(process_image)\n",
+        "          i += 1\n",
+        "\n",
+        "      # print(\"Total frames in video taken: \", i) \n",
+        "\n",
+        "      image_data.append(temp_image)\n",
+        "      temp_label = prim_no       \n",
+        "      label_data.append(temp_label)   \n",
+        "\n",
+        "  return  np.asarray(image_data),  np.asarray(tf.one_hot(label_data, prim_no)), prim_no\n",
+        "      "
+      ],
+      "execution_count": 5,
+      "outputs": []
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "ZGvysoGcXpEv",
+        "colab_type": "text"
+      },
+      "source": [
+        "### Extract data into train and test"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "metadata": {
+        "id": "Dhyf1asksoaC",
+        "colab_type": "code",
+        "colab": {}
+      },
+      "source": [
+        "data, label, N_CLASSES = build_dataset(DATA_DIR, N_FRAMES)\n",
+        "\n",
+        "train_data, test_data, train_label, test_label = train_test_split(\n",
+        "    data, label, test_size=0.20, shuffle=True, random_state=0)"
+      ],
+      "execution_count": 6,
+      "outputs": []
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "a0j7GK98X0Fg",
+        "colab_type": "text"
+      },
+      "source": [
+        "#### Save the data to disk [Optional]"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "metadata": {
+        "id": "_WijIninF2mP",
+        "colab_type": "code",
+        "colab": {}
+      },
+      "source": [
+        "DTSTR      = datetime.datetime.now()\n",
+        "DTSTR      = DTSTR.strftime(\"%Y-%m-%d-%H-%M\")\n",
+        "\n",
+        "# directory for saving the trained model\n",
+        "DATA_DIR  =  \"/content/drive/My Drive/TCS FullTime Work/LfD/Liquid_Pouring/Data_PKL/\"  \n",
+        "\n",
+        "data_dict  = {'traind': train_data, 'testd': test_data, 'trainl': train_label, 'testl': test_label}\n",
+        "filename   = 'data_' + DTSTR + '.pkl'\n",
+        "filepath   = DATA_DIR + filename\n",
+        "\n",
+        "outfile = open(filepath,'wb')\n",
+        "pkl.dump(data_dict,outfile)\n",
+        "outfile.close()\n",
+        "\n"
+      ],
+      "execution_count": 9,
+      "outputs": []
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "g-SP3f_9X8sB",
+        "colab_type": "text"
+      },
+      "source": [
+        "#### Load the saved data [Optional]"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "metadata": {
+        "id": "pWvm_KkirgEw",
+        "colab_type": "code",
+        "colab": {}
+      },
+      "source": [
+        "infile   = open(filepath,'rb')\n",
+        "new_dict = pkl.load(infile)\n",
+        "infile.close()\n",
+        "\n",
+        "train_data, test_data, train_label, test_label = new_dict['traind'], new_dict['testd'], new_dict['trainl'], new_dict['testl']\n",
+        "\n",
+        "\n",
+        "# print(data.shape, label.shape)"
+      ],
+      "execution_count": 13,
+      "outputs": []
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "colab_type": "text",
+        "id": "8gcZ-1lkpDhK"
+      },
+      "source": [
+        "## Build a model\n",
+        "\n",
+        "We create a model which take as input movies of shape\n",
+        "`(n_frames, width, height, channels)` and returns a movie\n",
+        "of identical shape.\n"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "metadata": {
+        "id": "sD19WMc5yPHz",
+        "colab_type": "code",
+        "colab": {
+          "base_uri": "https://localhost:8080/",
+          "height": 289
+        },
+        "outputId": "8fefa39b-3bed-4bfc-8c47-a4cd3c3f7e77"
+      },
+      "source": [
+        "# Working model with 1 output format\n",
+        "\n",
+        "model = keras.Sequential(\n",
+        "    [\n",
+        "        keras.Input(shape = (N_FRAMES, PX, PY, CHANNELS)),  \n",
+        "        layers.ConvLSTM2D(\n",
+        "            filters=64, kernel_size=(3, 3), padding=\"same\", return_sequences=False\n",
+        "        ),\n",
+        "        layers.MaxPooling2D(pool_size=(2, 2)),\n",
+        "        layers.Flatten(),\n",
+        "        # layers.Dropout(0.5),     # Enable if the model is overfitting\n",
+        "        # layers.Dense(100, activation='relu'),\n",
+        "        layers.Dense(N_CLASSES, activation='softmax'),\n",
+        "        \n",
+        "    ]\n",
+        ")\n",
+        "\n",
+        "# print model summary\n",
+        "model.summary()\n",
+        "\n",
+        "# model compilation\n",
+        "model.compile(loss='categorical_crossentropy', optimizer='adam', metrics=[\"accuracy\"])"
+      ],
+      "execution_count": 13,
+      "outputs": [
+        {
+          "output_type": "stream",
+          "text": [
+            "Model: \"sequential_1\"\n",
+            "_________________________________________________________________\n",
+            "Layer (type)                 Output Shape              Param #   \n",
+            "=================================================================\n",
+            "conv_lst_m2d_1 (ConvLSTM2D)  (None, 128, 128, 64)      154624    \n",
+            "_________________________________________________________________\n",
+            "max_pooling2d_1 (MaxPooling2 (None, 64, 64, 64)        0         \n",
+            "_________________________________________________________________\n",
+            "flatten_1 (Flatten)          (None, 262144)            0         \n",
+            "_________________________________________________________________\n",
+            "dense_1 (Dense)              (None, 4)                 1048580   \n",
+            "=================================================================\n",
+            "Total params: 1,203,204\n",
+            "Trainable params: 1,203,204\n",
+            "Non-trainable params: 0\n",
+            "_________________________________________________________________\n"
+          ],
+          "name": "stdout"
+        }
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "colab_type": "text",
+        "id": "hM9IeKmypDhV"
+      },
+      "source": [
+        "## Train the model (and Test)\n"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "metadata": {
+        "colab_type": "code",
+        "id": "-bBV_l6mpDhW",
+        "colab": {}
+      },
+      "source": [
+        "EPOCHS     = 100\n",
+        "BATCH_SIZE = 2\n",
+        "DTSTR      = datetime.datetime.now()\n",
+        "DTSTR      = DTSTR.strftime(\"%Y-%m-%d-%H-%M\")\n",
+        "\n",
+        "checkpoint = ModelCheckpoint(WRITE_DIR + \"best_model-\" + DTSTR + \".h5\", monitor='loss', verbose=1,\n",
+        "    save_best_only=True, mode='auto', period=1)\n",
+        "\n",
+        "model.fit(\n",
+        "    train_data,\n",
+        "    train_label,\n",
+        "    batch_size=BATCH_SIZE,\n",
+        "    epochs=EPOCHS,\n",
+        "    verbose=2,\n",
+        "    validation_data = (test_data, test_label),\n",
+        "    callbacks=[checkpoint]\n",
+        ")\n",
+        "\n",
+        "# The final trained model\n",
+        "model.save(WRITE_DIR + \"final_model-\" + DTSTR + \".h5\")"
+      ],
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "SB_xkkzdntjW",
+        "colab_type": "text"
+      },
+      "source": [
+        "## Inference on Human Demonstration\n",
+        "\n",
+        "Testing the trained model on human demonstration videos"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "metadata": {
+        "id": "EjwtP7O7tIJh",
+        "colab_type": "code",
+        "colab": {}
+      },
+      "source": [
+        "def build_inference_data(video_path, n_frames):\n",
+        "  '''\n",
+        "  this function is used to build dataset for inference stage\n",
+        "  '''\n",
+        "  # for storing data for the current video\n",
+        "  temp_image   = []\n",
+        "  image_data   = []\n",
+        "      \n",
+        "  sec         = 0      \n",
+        "  vidcap      = cv2.VideoCapture(video_path)     \n",
+        "  fps         = vidcap.get(cv2.CAP_PROP_FPS)           #  FPS of the video      \n",
+        "  frame_count = vidcap.get(cv2.CAP_PROP_FRAME_COUNT)   #  total frame count\n",
+        "  total_sec   = frame_count/fps                        #  total video length in seconds\n",
+        "  print(\"Total Time: \", total_sec, frame_count)\n",
+        "\n",
+        "  TIME_SEC    = total_sec/n_frames                     # the video will be sampled after every TIME_SEC          \n",
+        "  i = 0\n",
+        "  while (sec < total_sec):\n",
+        "    vidcap.set(cv2.CAP_PROP_POS_MSEC,sec*1000)         # setting which frame to get\n",
+        "    \n",
+        "    sec          += TIME_SEC\n",
+        "    success,image = vidcap.read()\n",
+        "    \n",
+        "    if success:\n",
+        "      process_image = preprocessing(image, PX, PY)\n",
+        "      temp_image.append(process_image)\n",
+        "      i += 1\n",
+        "\n",
+        "  print(\"Total frames in video taken: \", i) \n",
+        "\n",
+        "  image_data.append(temp_image)  \n",
+        "  return np.asarray(image_data)"
+      ],
+      "execution_count": 14,
+      "outputs": []
+    },
+    {
+      "cell_type": "code",
+      "metadata": {
+        "id": "JdK13lcXnq5c",
+        "colab_type": "code",
+        "colab": {
+          "base_uri": "https://localhost:8080/",
+          "height": 68
+        },
+        "outputId": "b2a3e3d9-7d8b-48fb-c43c-d2b647547226"
+      },
+      "source": [
+        "model_file       = \"final_model-2020-08-14-08-39.h5\"\n",
+        "latest_model     = tf.keras.models.load_model(WRITE_DIR + model_file)\n",
+        "\n",
+        "test_video_dir   = \"/content/drive/My Drive/TCS FullTime Work/LfD/Liquid_Pouring/Human Demonstrations/14th August/\"\n",
+        "test_video       = \"grasp1.MOV\"\n",
+        "test_path        = test_video_dir + test_video\n",
+        "\n",
+        "\n",
+        "inference_data = build_inference_data(test_path, N_FRAMES)\n",
+        "\n",
+        "y = latest_model.predict(inference_data)\n",
+        "print(y)"
+      ],
+      "execution_count": 16,
+      "outputs": [
+        {
+          "output_type": "stream",
+          "text": [
+            "Total Time:  3.3016666666666667 99.0\n",
+            "Total frames in video taken:  20\n",
+            "[[0.0000000e+00 2.8251416e-23 2.7744127e-07 9.9999976e-01]]\n"
+          ],
+          "name": "stdout"
+        }
+      ]
+    },
+    {
+      "cell_type": "code",
+      "metadata": {
+        "id": "LoJ9MRamcsHX",
+        "colab_type": "code",
+        "colab": {
+          "base_uri": "https://localhost:8080/",
+          "height": 34
+        },
+        "outputId": "a9c8c504-edd3-499c-f371-229ad486a1ed"
+      },
+      "source": [
+        "print(test_data.shape)"
+      ],
+      "execution_count": 15,
+      "outputs": [
+        {
+          "output_type": "stream",
+          "text": [
+            "(3, 20, 128, 128, 3)\n"
+          ],
+          "name": "stdout"
+        }
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "DLnCLohPkYO9",
+        "colab_type": "text"
+      },
+      "source": [
+        "## Miscellaneous - Not to be run"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "metadata": {
+        "id": "pSK9CTH9scve",
+        "colab_type": "code",
+        "colab": {
+          "base_uri": "https://localhost:8080/",
+          "height": 357
+        },
+        "outputId": "40d240ba-ee4c-429b-fd15-896c81728c5b"
+      },
+      "source": [
+        "model = keras.Sequential(\n",
+        "    [\n",
+        "        keras.Input(shape = (None, PX, PY, CHANNELS)),  \n",
+        "        layers.ConvLSTM2D(\n",
+        "            filters=64, kernel_size=(3, 3), padding=\"same\", return_sequences=True\n",
+        "        ),\n",
+        "        layers.ConvLSTM2D(\n",
+        "            filters=40, kernel_size=(3, 3), padding=\"same\", return_sequences=False\n",
+        "        ),\n",
+        "        layers.MaxPooling2D(pool_size=(2, 2)),\n",
+        "        layers.Flatten(),\n",
+        "        layers.Dropout(0.5),\n",
+        "        # layers.Dense(100, activation='relu'),\n",
+        "        layers.Dense(N_CLASSES, activation='softmax'),\n",
+        "        \n",
+        "    ]\n",
+        ")\n",
+        "\n",
+        "# print model summary\n",
+        "model.summary()\n",
+        "\n",
+        "# model compilation\n",
+        "model.compile(loss='categorical_crossentropy', optimizer='adam', metrics=[\"accuracy\"])\n"
+      ],
+      "execution_count": 6,
+      "outputs": [
+        {
+          "output_type": "stream",
+          "text": [
+            "Model: \"sequential\"\n",
+            "_________________________________________________________________\n",
+            "Layer (type)                 Output Shape              Param #   \n",
+            "=================================================================\n",
+            "conv_lst_m2d (ConvLSTM2D)    (None, None, 128, 128, 64 154624    \n",
+            "_________________________________________________________________\n",
+            "conv_lst_m2d_1 (ConvLSTM2D)  (None, 128, 128, 40)      149920    \n",
+            "_________________________________________________________________\n",
+            "max_pooling2d (MaxPooling2D) (None, 64, 64, 40)        0         \n",
+            "_________________________________________________________________\n",
+            "flatten (Flatten)            (None, 163840)            0         \n",
+            "_________________________________________________________________\n",
+            "dropout (Dropout)            (None, 163840)            0         \n",
+            "_________________________________________________________________\n",
+            "dense (Dense)                (None, 2)                 327682    \n",
+            "=================================================================\n",
+            "Total params: 632,226\n",
+            "Trainable params: 632,226\n",
+            "Non-trainable params: 0\n",
+            "_________________________________________________________________\n"
+          ],
+          "name": "stdout"
+        }
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "hOno8JzfQJWd",
+        "colab_type": "text"
+      },
+      "source": [
+        "### Model Evaluation on Test Set"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "metadata": {
+        "id": "0Pj6cJjHQNGl",
+        "colab_type": "code",
+        "colab": {
+          "base_uri": "https://localhost:8080/",
+          "height": 51
+        },
+        "outputId": "a32891b5-4bba-48e8-9d5f-5377a1b1f443"
+      },
+      "source": [
+        "score = model.evaluate(test_data, test_label, verbose=0)\n",
+        "print(\"Test loss:\", score[0])\n",
+        "print(\"Test accuracy:\", score[1])\n"
+      ],
+      "execution_count": null,
+      "outputs": [
+        {
+          "output_type": "stream",
+          "text": [
+            "Test loss: 99.90675354003906\n",
+            "Test accuracy: 0.0\n"
+          ],
+          "name": "stdout"
+        }
+      ]
+    },
+    {
+      "cell_type": "code",
+      "metadata": {
+        "id": "-WBHqG5W_Qou",
+        "colab_type": "code",
+        "colab": {}
+      },
+      "source": [
+        "model = keras.Sequential()\n",
+        "model.add(layers.ConvLSTM2D(filters = 64, kernel_size = (3, 3), return_sequences = False, data_format = \"channels_last\", input_shape = (N_FRAMES, PX, PY, 3)))\n",
+        "model.add(layers.Dropout(0.2))\n",
+        "model.add(layers.Flatten())\n",
+        "model.add(layers.Dense(256, activation=\"relu\"))\n",
+        "model.add(layers.Dropout(0.3))\n",
+        "model.add(layers.Dense(2, activation = \"softmax\"))\n",
+        "\n",
+        "model.summary()\n",
+        "model.compile(loss='categorical_crossentropy', optimizer='adam', metrics=[\"accuracy\"])"
+      ],
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "code",
+      "metadata": {
+        "id": "_ERnth0tmrLm",
+        "colab_type": "code",
+        "colab": {}
+      },
+      "source": [
+        "model = keras.Sequential(\n",
+        "    [\n",
+        "        keras.Input(shape = (None, PX, PY, CHANNELS)),  \n",
+        "        layers.ConvLSTM2D(\n",
+        "            filters=64, kernel_size=(3, 3), padding=\"same\", return_sequences=False\n",
+        "        ),\n",
+        "        layers.BatchNormalization(),\n",
+        "        layers.ConvLSTM2D(\n",
+        "            filters=64, kernel_size=(3, 3), padding=\"same\", return_sequences=True\n",
+        "        ),\n",
+        "        layers.BatchNormalization(),\n",
+        "        layers.ConvLSTM2D(\n",
+        "            filters=64, kernel_size=(3, 3), padding=\"same\", return_sequences=True\n",
+        "        ),\n",
+        "        layers.BatchNormalization(),\n",
+        "        layers.Flatten(),\n",
+        "        layers.Dropout(0.5),\n",
+        "        \n",
+        "        # layers.Dense(100, activation='relu'),\n",
+        "        layers.Dense(N_CLASSES, activation='softmax'),\n",
+        "        \n",
+        "    ]\n",
+        ")\n",
+        "\n",
+        "model.summary()\n",
+        "\n",
+        "# model compilation\n",
+        "model.compile(loss='categorical_crossentropy', optimizer='adam', metrics=[\"accuracy\"])"
+      ],
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "code",
+      "metadata": {
+        "id": "5cqcT5XrBDMn",
+        "colab_type": "code",
+        "colab": {
+          "base_uri": "https://localhost:8080/",
+          "height": 85
+        },
+        "outputId": "61911d32-1f19-4fa5-80ab-5c227aa1d4a9"
+      },
+      "source": [
+        "test_data = np.asarray(train_data)\n",
+        "test_label = np.asarray(train_label)\n",
+        "\n",
+        "print(train_data.shape)\n",
+        "print(train_label.shape)\n",
+        "print(train_label)"
+      ],
+      "execution_count": null,
+      "outputs": [
+        {
+          "output_type": "stream",
+          "text": [
+            "(2, 15, 128, 128, 3)\n",
+            "(2, 2)\n",
+            "[[1. 0.]\n",
+            " [0. 1.]]\n"
+          ],
+          "name": "stdout"
+        }
+      ]
+    }
+  ]
+}
